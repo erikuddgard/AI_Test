@@ -1,0 +1,10 @@
+{
+  "description": "Create stunning, custom websites effortlessly with a user-friendly interface designed for businesses and individuals seeking an online presence.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
