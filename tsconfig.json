@@ -25,7 +25,8 @@
       "node"
     ],
     "strict": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+    "rewriteRelativeImportExtensions": true
   },
   "include": [
     "src",
