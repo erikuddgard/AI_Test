@@ -1,0 +1,21 @@
+# Requires a Render account, a GitHub connection, and review of paid service/disk costs.
+# This declares deployment settings; it does not provision or publish a service.
+services:
+  - type: web
+    name: quizligan
+    runtime: docker
+    branch: quizligan-deploy
+    plan: starter
+    numInstances: 1
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    envVars:
+      - key: LEAGUE_DATA_DIR
+        value: /data
+      - key: OCR_LANG
+        value: eng+swe
+    disk:
+      name: quizligan-data
+      mountPath: /data
+      sizeGB: 1

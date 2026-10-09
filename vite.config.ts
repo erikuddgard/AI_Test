@@ -2,6 +2,7 @@ import { defineConfig, type HtmlTagDescriptor, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'node:path'
+import { handleApi } from './server/api.ts'
 
 import siteConfiguration from './.figma/make/site.json'
 
@@ -17,6 +18,14 @@ export default defineConfig(({ mode }) => {
       minify: !emitSourcemaps,
     },
     plugins: [
+      {
+        name: 'quiz-league-api',
+        configureServer(server) {
+          server.middlewares.use((req, res, next) => {
+            void handleApi(req, res).then(handled => { if (!handled) next() }).catch(next)
+          })
+        },
+      },
       react(),
       tailwindcss(),
       figmaSiteConfiguration(siteConfiguration),

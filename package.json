@@ -7,7 +7,9 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "format": "oxfmt"
+    "format": "oxfmt",
+    "start": "node server/start.ts",
+    "test": "node --test server/*.test.ts"
   },
   "dependencies": {
     "react": "^19.0.0",
