@@ -5,14 +5,7 @@ import {
   randomUUID,
   timingSafeEqual,
 } from "node:crypto";
-import {
-  mkdir,
-  readFile,
-  writeFile,
-  rename,
-  mkdtemp,
-  rm,
-} from "node:fs/promises";
+import { writeFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -24,9 +17,13 @@ import {
   type League,
   type Entry,
 } from "../src/league.ts";
+import {
+  getStore,
+  StoreError,
+  type LeagueStore,
+  type StoredLeague,
+} from "./store.ts";
 const exec = promisify(execFile);
-type Stored = { league: League; tokenHash: string };
-const dataDir = process.env.LEAGUE_DATA_DIR || path.resolve(".league-data");
 const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 const uuidPattern =
@@ -49,18 +46,49 @@ function send(res: ServerResponse, status: number, value: unknown) {
 async function body(req: IncomingMessage, max = 64_000): Promise<any> {
   if (!req.headers["content-type"]?.startsWith("application/json"))
     throw new HttpError(415, "Skicka JSON-data.");
+  const tooLarge = () => new HttpError(
+    413,
+    max > 64_000
+      ? "Bilden är för stor. Max 5 MB."
+      : "Förfrågan är för stor.",
+  );
+  if (Number(req.headers["content-length"]) > max) throw tooLarge();
+  let parsedBody: unknown;
+  try {
+    // Vercel may expose a lazy getter which parses JSON on first access.
+    parsedBody = (req as IncomingMessage & { body?: unknown }).body;
+  } catch {
+    throw new HttpError(400, "Ogiltiga data.");
+  }
+  if (parsedBody !== undefined) {
+    let text: string;
+    try {
+      text = Buffer.isBuffer(parsedBody)
+        ? parsedBody.toString("utf8")
+        : typeof parsedBody === "string"
+          ? parsedBody
+          : JSON.stringify(parsedBody);
+      if (typeof text !== "string") throw new Error();
+    } catch {
+      throw new HttpError(400, "Ogiltiga data.");
+    }
+    if (Buffer.byteLength(text, "utf8") > max) throw tooLarge();
+    try {
+      const value = JSON.parse(text);
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new Error();
+      return value;
+    } catch {
+      throw new HttpError(400, "Ogiltiga data.");
+    }
+  }
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     size += chunk.length;
     if (size > max) {
       req.resume();
-      throw new HttpError(
-        413,
-        max > 64_000
-          ? "Bilden är för stor. Max 5 MB."
-          : "Förfrågan är för stor.",
-      );
+      throw tooLarge();
     }
     chunks.push(chunk);
   }
@@ -73,23 +101,7 @@ async function body(req: IncomingMessage, max = 64_000): Promise<any> {
     throw new HttpError(400, "Ogiltiga data.");
   }
 }
-async function load(id: string): Promise<Stored> {
-  try {
-    return JSON.parse(await readFile(path.join(dataDir, `${id}.json`), "utf8"));
-  } catch (error: any) {
-    if (error.code === "ENOENT")
-      throw new HttpError(404, "Ligan hittades inte. Kontrollera länken.");
-    throw error;
-  }
-}
-async function save(stored: Stored) {
-  await mkdir(dataDir, { recursive: true, mode: 0o700 });
-  const dest = path.join(dataDir, `${stored.league.id}.json`),
-    temp = `${dest}.${randomUUID()}.tmp`;
-  await writeFile(temp, JSON.stringify(stored), { mode: 0o600 });
-  await rename(temp, dest);
-}
-function authorize(req: IncomingMessage, stored: Stored) {
+function authorize(req: IncomingMessage, stored: StoredLeague) {
   const token = req.headers.authorization?.replace(/^Bearer /, "") || "";
   if (!timingSafeEqual(Buffer.from(hash(token)), Buffer.from(stored.tokenHash)))
     throw new HttpError(
@@ -110,12 +122,6 @@ function limit(req: IncomingMessage) {
       "För många försök. Vänta en minut och försök igen.",
     );
   requests.set(key, value);
-}
-let mutationQueue: Promise<unknown> = Promise.resolve();
-function serialize<T>(fn: () => Promise<T>): Promise<T> {
-  const next = mutationQueue.then(fn);
-  mutationQueue = next.catch(() => {});
-  return next;
 }
 let ocrBusy = false;
 async function recognize(data: string) {
@@ -157,10 +163,13 @@ async function recognize(data: string) {
 export async function handleApi(
   req: IncomingMessage,
   res: ServerResponse,
+  options: { serverless?: boolean; store?: LeagueStore } = {},
 ): Promise<boolean> {
   const url = new URL(req.url || "/", "http://localhost");
   if (!url.pathname.startsWith("/api/")) return false;
   try {
+    const serverless = options.serverless || Boolean(process.env.VERCEL);
+    const store = options.store ?? getStore(serverless);
     if (req.method !== "GET") {
       // Reject browser cross-origin mutations; no CORS access is granted.
       const origin = req.headers.origin;
@@ -186,7 +195,7 @@ export async function handleApi(
         participants: [],
         quizzes: [],
       };
-      await save({ league, tokenHash: hash(token) });
+      await store.create({ league, tokenHash: hash(token), revision: 0 });
       send(res, 201, { league, adminToken: token });
       return true;
     }
@@ -197,11 +206,16 @@ export async function handleApi(
       throw new HttpError(404, "Sidan hittades inte.");
     const [, id, section, quizId] = match;
     if (!section && req.method === "GET") {
-      send(res, 200, (await load(id)).league);
+      send(res, 200, (await store.load(id)).league);
       return true;
     }
     if (section === "ocr" && req.method === "POST" && !quizId) {
-      authorize(req, await load(id));
+      authorize(req, await store.load(id));
+      if (serverless)
+        throw new HttpError(
+          501,
+          "Bildavläsningen sker i webbläsaren på den här sidan.",
+        );
       const input = await body(req, 7_100_000);
       send(res, 200, await recognize(input.image));
       return true;
@@ -213,8 +227,7 @@ export async function handleApi(
         (req.method === "DELETE" && quizId))
     ) {
       const input = req.method === "DELETE" ? null : await body(req);
-      const league = await serialize(async () => {
-        const stored = await load(id);
+      const league = await store.mutate(id, async (stored) => {
         authorize(req, stored);
         const league = stored.league;
         if (quizId && !league.quizzes.some((q) => q.id === quizId))
@@ -277,7 +290,6 @@ export async function handleApi(
             "Ligan kan innehålla högst 35 olika deltagare. Kontrollera stavningen på namnen.",
           );
         league.quizzes.sort((a, b) => a.date.localeCompare(b.date));
-        await save(stored);
         return league;
       });
       send(res, 200, league);
@@ -285,14 +297,15 @@ export async function handleApi(
     }
     throw new HttpError(405, "Åtgärden stöds inte.");
   } catch (error) {
-    if (!(error instanceof HttpError))
+    const known = error instanceof HttpError || error instanceof StoreError;
+    if (!known)
       console.error(
         "League API failed:",
         error instanceof Error ? error.message : "Unknown error",
       );
-    send(res, error instanceof HttpError ? error.status : 500, {
+    send(res, known ? error.status : 500, {
       error:
-        error instanceof HttpError
+        known
           ? error.message
           : "Servern kunde inte spara resultatet. Försök igen.",
     });

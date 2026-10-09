@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { recognizeResults } from "./ocr";
 import {
   demo,
   points,
@@ -266,12 +267,9 @@ function QuizEditor({
       });
       if (!mounted.current) return;
       setImage(base64);
-      const result = await api<{ text: string; entries: Entry[] }>(
-        `/api/leagues/${league.id}/ocr`,
-        "POST",
-        { image: base64.split(",")[1] },
-        token,
-      );
+      const result = await recognizeResults(file, status => {
+        if (mounted.current) setBusy(status);
+      });
       if (!mounted.current) return;
       setRawText(result.text);
       setEntries(result.entries);

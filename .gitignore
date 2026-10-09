@@ -13,3 +13,7 @@ logs/
 .tmp-*
 
 .league-data/
+
+!.env.example
+public/ocr/
+.vercel/
