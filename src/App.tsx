@@ -1,4 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import AdminPanel from "./AdminPanel";
+import Celebration from "./Celebration";
+import "./enhancements.css";
 import { recognizeResults } from "./ocr";
 import {
   demo,
@@ -606,19 +609,19 @@ function Evolution({ league, selected }: { league: League; selected: string }) {
     </div>
   );
 }
-function StandingsRace({ league, before, replay, showAll, onPlayingChange }: {
-  league: League; before?: League; replay: number; showAll: boolean; onPlayingChange: (playing: boolean) => void;
+function StandingsRace({ league, before, replay, showAll, onPlayingChange, onCelebrate }: {
+  league: League; before?: League; replay: number; showAll: boolean; onPlayingChange: (playing: boolean) => void; onCelebrate: () => void;
 }) {
   const [progress, setProgress] = useState(1);
   const [playing, setPlaying] = useState(false);
   const [reduced, setReduced] = useState(false);
   const [run, setRun] = useState(0);
   const frame = useRef(0);
-  const finalRows = standings(league);
-  const baseline = before?.id === league.id ? before : {
-    ...league, quizzes: league.quizzes.slice(0, -1),
-  };
-  const previous = new Map(standings(baseline).map(p => [p.id, p.total]));
+  const finalRows = useMemo(() => standings(league), [league]);
+  const previous = useMemo(() => {
+    const baseline = before?.id === league.id ? before : {...league, quizzes: league.quizzes.slice(0, -1)};
+    return new Map(standings(baseline).map(p => [p.id, p.total]));
+  }, [league, before]);
   useEffect(() => {
     const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
     const update = () => setReduced(preference.matches);
@@ -634,7 +637,7 @@ function StandingsRace({ league, before, replay, showAll, onPlayingChange }: {
     setProgress(0); setPlaying(true);
     const start = performance.now();
     const tick = (now: number) => {
-      const elapsed = Math.min(1, (now - start) / 5000);
+      const elapsed = Math.min(1, (now - start) / 10000);
       setProgress(elapsed);
       if (elapsed < 1) frame.current = requestAnimationFrame(tick);
       else setPlaying(false);
@@ -644,26 +647,38 @@ function StandingsRace({ league, before, replay, showAll, onPlayingChange }: {
   }, [replay, run, reduced, league]);
   useEffect(() => { onPlayingChange(playing); return () => onPlayingChange(false); }, [playing, onPlayingChange]);
   const moving = finalRows.map((p, i) => {
-    const from = previous.get(p.id) || 0;
-    const phase = Math.max(0, Math.min(1, (progress - .12 - (i % 5) * .018) / .78));
-    const eased = phase * phase * (3 - 2 * phase);
-    return { ...p, score: progress === 1 ? p.total : from + (p.total - from) * eased };
+    const from = run ? p.total : previous.get(p.id) || 0;
+    let score = p.total;
+    if (progress < .18) {
+      const t = progress / .18;
+      score = from * (1 - t * t * (3 - 2 * t));
+    } else if (progress < .27) score = 0;
+    else if (progress < .93) {
+      const t = (progress - .27) / .66;
+      const eased = t * t * (3 - 2 * t);
+      const sway = .24 * Math.sin(t * Math.PI * 5 + i * .85) * Math.sin(t * Math.PI);
+      score = p.total * Math.max(0, Math.min(1.2, eased + sway));
+    }
+    return { ...p, score };
+
   }).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, "sv"));
-  const max = Math.max(1, ...moving.map(p => p.score));
+  const max = Math.max(1, ...finalRows.map(p => p.total), ...previous.values());
   const count = showAll ? moving.length : Math.min(8, moving.length);
   return <>
 
     <div className="race-controls">
-      <span role="status">{playing ? "Poängen rullar in… vem tar ledningen?" : reduced ? "Slutställning · minskad rörelse är aktiverad" : "Slutställningen är avslöjad"}</span>
+      <span role="status">{playing ? progress < .18 ? "Ner till noll… håll i er." : progress < .27 ? "Allt kan hända. Är ni redo?" : progress < .8 ? "Det svänger! Vem tar täten?" : "Nu avgörs det…" : reduced ? "Slutställning · minskad rörelse är aktiverad" : "Slutställningen är avslöjad"}</span>
+      <div className="race-buttons"><button className="celebrate-button" onClick={onCelebrate}>✦ Fira!</button>
       {playing ? <button onClick={() => {cancelAnimationFrame(frame.current);setProgress(1);setPlaying(false);}}>Visa slutställningen</button> :
         <button onClick={() => setRun(n => n + 1)} disabled={reduced}>↻ Spela upp igen</button>}
+      </div>
     </div>
     <div className={`race-stage ${playing ? "racing" : "settled"}`} style={{height: count * 46}} aria-label="Totalställning">
       {moving.map((p, i) => <div key={p.id} className={`bar-row ${i === 0 ? "first" : ""}`}
         aria-hidden={i >= count} style={{transform:`translateY(${i * 46}px)`,opacity:i < count ? 1 : 0}}>
         <span className="bar-rank">{moving.findIndex(r => r.score === p.score) + 1}</span>
         <span className="bar-name" title={p.name}>{p.name}{i === 0 && <Icon name="cup" size={13}/>}</span>
-        <div className="bar-track"><div className="bar-fill" style={{width:`${Math.max(0, p.score / max * 100)}%`}}><span/></div></div>
+        <div className="bar-track"><div className="bar-fill" style={{width:`${Math.max(0, Math.min(100, p.score / max * 100))}%`}}><span/></div></div>
         <strong>{Math.round(p.score)}<small>p</small></strong>
       </div>)}
     </div>
@@ -679,7 +694,7 @@ export default function App() {
     [chart, setChart] = useState<"total" | "evolution">("total"),
     [showAll, setShowAll] = useState(false),
     [selected, setSelected] = useState("");
-  const [modal, setModal] = useState<"create" | "share" | "quiz" | null>(null),
+  const [modal, setModal] = useState<"create" | "share" | "quiz" | "admin" | null>(null),
     [editing, setEditing] = useState<Quiz>(),
     [createTitle, setCreateTitle] = useState("Fredagsligan"),
     [busy, setBusy] = useState(false),
@@ -688,6 +703,24 @@ export default function App() {
     [search, setSearch] = useState(""),
     [activeNav, setActiveNav] = useState("Översikt"),
     [view, setView] = useState<"overview" | "history">("overview");
+  const [celebration, setCelebration] = useState(0);
+  const [celebrating, setCelebrating] = useState(false);
+  const eggClicks = useRef(0);
+  function celebrate() { setCelebration(n => n + 1); setCelebrating(true); }
+  function secretCup() {
+    if (++eggClicks.current % 5 === 0) {notify("Pokalen är putsad. Vaktmästaren godkänner. 🏆");celebrate();}
+  }
+  useEffect(() => {
+    let typed = "";
+    const keyboard = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.ctrlKey || event.metaKey || event.altKey || target?.closest("input, textarea, select, [contenteditable]")) return;
+      typed = (typed + event.key.toLocaleLowerCase("sv")).slice(-4);
+      if (typed === "quiz") {notify("Hemliga quizklubben hälsar: nästa omgång är din! ✨");celebrate();typed = "";}
+    };
+    window.addEventListener("keydown", keyboard);
+    return () => window.removeEventListener("keydown", keyboard);
+  }, []);
   const [detail, setDetail] = useState<Quiz>();
   const [raceBefore, setRaceBefore] = useState<League>();
   const [raceReplay, setRaceReplay] = useState(0);
@@ -750,7 +783,7 @@ export default function App() {
       void api<League>(`/api/leagues/${league.id}`)
         .then((value) => {
           if (active) {
-            setLeague(value);
+            setLeague(current => JSON.stringify(current) === JSON.stringify(value) ? current : value);
             setLoadError("");
           }
         })
@@ -916,6 +949,7 @@ export default function App() {
           ))}
         </nav>
         <div className="header-actions">
+          <button className="button secondary small admin-nav-button" onClick={() => setModal("admin")}>Admin</button>
           <span className="league-status">
             <i />
             {isDemo ? "Demoliga" : canEdit ? "Administratör" : "Läsbehörighet"}
@@ -1125,7 +1159,7 @@ export default function App() {
                     </div>
                   </>
                 ) : (
-                  <StandingsRace league={league} before={raceBefore} replay={raceReplay} showAll={showAll} onPlayingChange={setRacePlaying} />
+                  <StandingsRace league={league} before={raceBefore} replay={raceReplay} showAll={showAll} onPlayingChange={setRacePlaying} onCelebrate={celebrate} />
                 )}
                 <div className="chart-footer">
                   <span>
@@ -1511,8 +1545,15 @@ export default function App() {
           quizligan.
         </a>
         <span>Byggd för teamet. Och lite för vinnarskallen.</span>
-        <span>Spela. Samla poäng. Gör det igen.</span>
+        <button className="footer-secret" onClick={secretCup}>Spela. Samla poäng. Gör det igen.</button>
       </footer>
+      {celebrating && <Celebration trigger={celebration} onFinish={() => setCelebrating(false)} />}
+      {modal === "admin" && <Modal title="Vaktmästarens nyckelknippa" subtitle="Huvudadmin · alla ligor på ett ställe" onClose={() => {if (!busy) setModal(null);}} wide>
+        <AdminPanel onBusyChange={setBusy} onDeleted={id => {
+          try {localStorage.removeItem(`quizligan-admin-${id}`);} catch {}
+          if (league.id === id) {setLeague(demo);setToken("");setRaceBefore(undefined);setRaceReplay(0);setLoadError("");history.replaceState(null, "", location.pathname);}
+        }}/>
+      </Modal>}
       {toast && (
         <div className="toast" role="status">
           <Icon name="check" size={17} />
@@ -1654,4 +1695,3 @@ export default function App() {
     </div>
   );
 }
-

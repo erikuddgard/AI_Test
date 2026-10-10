@@ -17,15 +17,15 @@
   ],
   "crons": [
     {
-      "path": "/api/leagues/ea09ccae-ddf5-4f24-a59f-b6ca079eeccf",
+      "path": "/api/health/database",
       "schedule": "0 8 * * *"
     },
     {
-      "path": "/api/leagues/ea09ccae-ddf5-4f24-a59f-b6ca079eeccf",
+      "path": "/api/health/database",
       "schedule": "0 12 * * *"
     },
     {
-      "path": "/api/leagues/ea09ccae-ddf5-4f24-a59f-b6ca079eeccf",
+      "path": "/api/health/database",
       "schedule": "0 16 * * *"
     }
   ]

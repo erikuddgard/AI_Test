@@ -23,6 +23,7 @@ import {
   type LeagueStore,
   type StoredLeague,
 } from "./store.ts";
+import { adminCookie, verifyAdminSession, verifyAdminPassword, generatedOwnerToken, throttleAdminLogin } from "./admin-auth.ts";
 const exec = promisify(execFile);
 const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
@@ -179,6 +180,57 @@ export async function handleApi(
           "Förfrågan måste komma från ligans egen sida.",
         );
       limit(req);
+    }
+    if (url.pathname === "/api/health/database" && req.method === "GET") {
+      if (!store.ping) throw new HttpError(503, "Databaskontroll saknas.");
+      await store.ping();
+      send(res, 200, {ok: true});
+      return true;
+    }
+    if (url.pathname.startsWith("/api/admin/")) {
+      if (url.pathname === "/api/admin/session" && req.method === "POST") {
+        throttleAdminLogin(req);
+        const input = await body(req);
+        verifyAdminPassword(input.password);
+        res.setHeader("Set-Cookie", adminCookie(req));
+        send(res, 200, {ok: true});
+        return true;
+      }
+      if (url.pathname === "/api/admin/session" && req.method === "DELETE") {
+        res.setHeader("Set-Cookie", adminCookie(req, true));
+        send(res, 200, {ok: true});
+        return true;
+      }
+      verifyAdminSession(req);
+      if (url.pathname === "/api/admin/leagues" && req.method === "GET") {
+        if (!store.list) throw new HttpError(503, "Adminpanelen stöds inte av databasen.");
+        const items = await store.list();
+        send(res, 200, items.map(({league, tokenHash}) => {
+          const candidate = generatedOwnerToken(league.id);
+          return {id: league.id, title: league.title, participants: league.participants.length, quizzes: league.quizzes.length,
+            adminToken: hash(candidate) === tokenHash ? candidate : null};
+        }));
+        return true;
+      }
+      const adminMatch = url.pathname.match(/^\/api\/admin\/leagues\/([^/]+)(?:\/(owner-link))?$/);
+      if (!adminMatch || !uuidPattern.test(adminMatch[1])) throw new HttpError(404, "Ligan hittades inte.");
+      const [, leagueId, action] = adminMatch;
+      if (action === "owner-link" && req.method === "POST") {
+        const adminToken = generatedOwnerToken(leagueId);
+        await store.mutate(leagueId, stored => { stored.tokenHash = hash(adminToken); return stored.league; });
+        send(res, 200, {adminToken});
+        return true;
+      }
+      if (!action && req.method === "DELETE") {
+        const input = await body(req);
+        const stored = await store.load(leagueId);
+        if (input.confirmTitle !== stored.league.title) throw new HttpError(400, "Skriv ligans namn för att bekräfta borttagningen.");
+        if (!store.remove) throw new HttpError(503, "Borttagning stöds inte av databasen.");
+        await store.remove(leagueId);
+        send(res, 200, {ok: true});
+        return true;
+      }
+      throw new HttpError(405, "Åtgärden stöds inte.");
     }
     if (url.pathname === "/api/leagues" && req.method === "POST") {
       const input = await body(req);

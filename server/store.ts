@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
 import type { League } from "../src/league.ts"
 
@@ -12,6 +12,9 @@ type Mutation = (stored: StoredLeague) => League | Promise<League>
 export interface LeagueStore {
   create(stored: StoredLeague): Promise<void>
   load(id: string): Promise<StoredLeague>
+  ping?(): Promise<void>
+  list?(): Promise<StoredLeague[]>
+  remove?(id: string): Promise<void>
   mutate(id: string, mutation: Mutation): Promise<League>
 }
 export class StoreError extends Error {
@@ -49,6 +52,27 @@ class FileStore implements LeagueStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") throw notFound()
       throw error
     }
+  }
+
+  async ping() { await this.list(); }
+
+  async list() {
+    let files: string[];
+    try { files = await readdir(this.dataDir); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    return Promise.all(files.filter(file => /^[a-f0-9-]{36}\.json$/.test(file)).map(file => this.load(file.slice(0, -5))));
+  }
+
+  async remove(id: string) {
+    const next = this.queue.then(async () => {
+      await this.load(id);
+      await rm(path.join(this.dataDir, `${id}.json`));
+    });
+    this.queue = next.catch(() => {});
+    return next;
   }
 
   private async save(stored: StoredLeague) {
@@ -174,12 +198,31 @@ class SupabaseStore implements LeagueStore {
     return this.stored(rows[0], id)
   }
 
+  async ping() { await this.call(new URLSearchParams({select: "id", limit: "1"})); }
+
+  async list() {
+    const result: StoredLeague[] = [];
+    for (let offset = 0; ; offset += 200) {
+      const rows = await this.call(new URLSearchParams({select: fields, order: "id.asc", limit: "200", offset: String(offset)}));
+      result.push(...rows.map(row => this.stored(row, row.id)));
+      if (rows.length < 200) return result;
+      if (result.length >= 10000) throw new StoreError(413, "För många ligor för att visa samtidigt.");
+    }
+  }
+
+  async remove(id: string) {
+    const rows = await this.call(new URLSearchParams({id: `eq.${id}`, select: fields}), {method: "DELETE"});
+    if (!rows.length) throw notFound();
+    if (rows.length !== 1) throw unavailable();
+  }
+
   async mutate(id: string, mutation: Mutation): Promise<League> {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const stored = await this.load(id)
       // Authorization, limits and name matching must be rerun against the
       // newest league after every conflict, not just the first snapshot.
-      const league = await mutation(structuredClone(stored))
+      const draft = structuredClone(stored)
+      const league = await mutation(draft)
       const rows = await this.call(
         new URLSearchParams({
           id: `eq.${id}`,
@@ -188,7 +231,7 @@ class SupabaseStore implements LeagueStore {
         }),
         {
           method: "PATCH",
-          body: JSON.stringify({ league, revision: stored.revision + 1 }),
+          body: JSON.stringify({ league, revision: stored.revision + 1, ...(draft.tokenHash !== stored.tokenHash ? {token_hash: draft.tokenHash} : {}) }),
         },
       )
       if (rows.length === 0) continue
